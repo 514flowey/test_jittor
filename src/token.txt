@@ -1,0 +1,6 @@
+sudo docker start elastic_knuth
+
+http://127.0.0.1:8888/?token=66b9aa66fb2cda65bc8bac5d2cafeae5f30c2a48d2ff68d4
+
+
+http://127.0.0.1:8888/?token=19626e637004f5521034bea975fd51e43c3427e7c653a34c

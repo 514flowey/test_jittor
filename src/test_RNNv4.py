@@ -1,0 +1,213 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import collections
+import os
+import random
+import time
+from tqdm import tqdm
+import jittor as jt
+from jittor import nn
+from jittor.dataset.dataset import Dataset
+import numpy as np
+
+
+# In[2]:
+
+
+def decode_file(file_ID_name, file_result_name):
+    file_ID = open(file_ID_name, "r")
+    file_result = open(file_result_name, "r")
+    data = []
+    
+    for line1, line2 in zip(file_ID, file_result):
+        feature = line1.replace('\n','').lower().split(' ')
+        label = line2.replace('\n','').lower().split(',')
+        label = [int(x) for x in label]
+        data.append([feature, label[1:]])
+    
+    random.shuffle(data)
+    file_ID.close()
+    file_result.close()
+    return data
+
+
+# In[3]:
+
+
+folder_name = "/.cached/data/"
+train_ID_name = folder_name + "ID_train"
+train_result_name = folder_name + "ISEAR_train"
+train_data = decode_file(train_ID_name, train_result_name)
+
+
+# In[4]:
+
+
+class MyVocab:
+    def __init__(self):
+        self._vocab = {}
+        self._size = 1
+        
+    def insert(self, word):
+        if word not in self._vocab.keys():
+            self._vocab[word] = self._size
+            self._size = self._size + 1
+    
+    def locate(self, word):
+        if word not in self._vocab.keys():
+            return 0
+        return self._vocab[word]
+    
+    def size(self):
+        return self._size
+
+def build_vocab(data):
+    vocab = MyVocab()
+    for sentence in data:
+        for word in sentence[0]:
+            vocab.insert(word)
+    return vocab
+
+def resize_sentence(data, normal_len):
+    def pad(sentence, size):
+        return sentence[:size] if len(sentence) > size else sentence+[0]*(size-len(sentence))
+    return [[pad(sentence[0], normal_len), sentence[1]] for sentence in data]
+    
+
+train_vocab = build_vocab(train_data)
+
+
+# In[5]:
+
+
+class TrainDataset(Dataset):
+    def __init__(self, vocab=None, data=None, normal_len=180, batch_size=1, shuffle=False):
+        super().__init__()
+        
+        self._batch_size = batch_size
+        self._shuffle = shuffle
+        self._total_len = len(data)
+        self._sentence_len = normal_len
+        self._vocab = vocab
+        self._data = []
+        for sentence in data:
+            self._data.append([[vocab.locate(x) for x in sentence[0]], sentence[1]])
+#        self._data = resize_sentence(self._data, normal_len)
+        self.set_attrs(batch_size=self._batch_size, total_len=self._total_len, shuffle=self._shuffle)
+            
+    def __getitem__(self, index):
+        feature = jt.array(self._data[index][0])
+        label = np.argmax(self._data[index][1])
+        return feature, label
+    
+trainDataset = TrainDataset(vocab = train_vocab, data = train_data, normal_len=180, batch_size=1, shuffle=True)
+
+
+# In[6]:
+
+
+class TextRNN(jt.Module):
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers=1, num_emotion=7):
+        super(TextRNN, self).__init__()
+        self._num_hiddens = num_hiddens
+        self._embed_size = embed_size
+        self._num_layers = num_layers
+        self._embedding = nn.Embedding(vocab_size, embed_size)
+        self._encoder = nn.LSTM(input_size=embed_size,
+                               hidden_size=num_hiddens,
+                               num_layers=num_layers,
+                               bidirectional=False)
+        self._decoder = nn.Linear(num_hiddens * 2, num_emotion)
+        
+    def execute(self, inputs):
+        '''
+        @params:
+            inputs: 词语下标序列，形状为 (batch_size, len_sentence) 的整数张量
+        @return:
+            outputs: 对文本情感的预测，形状为 (batch_size, num_emotion) 的张量
+        '''
+        batch_size = inputs.shape[0]
+        inputs = inputs.flatten()
+        embeddings = self._embedding(inputs)
+        # embeddings -> (batch_size, len_sentence, embed_size)
+        embeddings = jt.reshape(embeddings, (batch_size, embeddings.shape[0]//batch_size, embeddings.shape[1]))
+        embeddings = embeddings.permute(1, 0, 2)
+        # embeddings -> (len_sentence, batch_size, embed_size)
+        hx = (jt.ones((self._num_layers, batch_size, self._num_hiddens)),
+              jt.ones((self._num_layers, batch_size, self._num_hiddens)))
+        hiddens, _ = self._encoder(embeddings, hx)
+        encoding = jt.concat([hiddens[0], hiddens[-1]], dim = -1)
+        outputs = self._decoder(encoding)
+        return outputs
+
+vocab_size = train_vocab.size()
+embed_size, num_hiddens, num_layers = 100, 100, 2
+net = TextRNN(vocab_size, embed_size, num_hiddens, num_layers)
+
+
+# In[7]:
+
+
+def train(model, train_loader, optimizer, init_lr, epoch, max_epoch, start_time):
+    model.train()
+    max_iter = len(train_loader)
+    
+    sum_tot, sum_acc, loss_sum = 0, 0, 0
+    for index, (feature, label) in enumerate(train_loader):
+        pred = model(feature)
+        loss = nn.cross_entropy_loss(pred, label)
+        loss_sum += loss.data[0]
+        optimizer.step(loss)
+        sum_acc += (jt.argmax(pred, dim=-1)[0] == label).float().sum()
+        sum_tot = sum_tot + label.shape[0]
+        if index % 200 == 199:
+            print ('Training in epoch {} iteration {} acc = {} loss = {}, time = {}'
+                   .format(epoch, index, sum_acc/sum_tot, loss_sum/(index+1), time.time() - start_time))
+
+def evaluate(model, test_loader, epoch):
+    model.eval()
+    
+    sum_acc = 0
+    sum_tot = 0
+    for index, (feature, label) in enumerate(test_loader):
+        pred = model(feature)
+        sum_acc += (jt.argmax(pred, dim=-1)[0] == label).float().sum()
+        sum_tot = sum_tot + label.shape[0]
+    print ("Testing in epoch {}, acc = {}".format(epoch, sum_acc / sum_tot))
+
+
+# In[ ]:
+
+
+test_ID_name = folder_name + "ID_test"
+test_result_name = folder_name + "ISEAR_test"
+test_data = decode_file(test_ID_name, test_result_name)
+testDataset = TrainDataset(vocab = train_vocab, data = test_data)
+
+
+learning_rate = 0.001
+max_epoch = 5
+optimizer = nn.Adam(net.parameters(), lr=learning_rate)
+start_time = time.time()
+for epoch in range(max_epoch):
+    train(net, trainDataset, optimizer, learning_rate, epoch, max_epoch, start_time)
+    evaluate(net, testDataset, epoch)
+
+
+# In[ ]:
+
+
+pred = jt.array([[1],[2],[3],[4]])
+label = jt.array([[1],[2],[0],[1]])
+print(pred == label)
+
+
+# In[ ]:
+
+
+
+
