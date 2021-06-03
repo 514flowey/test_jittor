@@ -38,13 +38,14 @@ def decode_file(file_ID_name, file_result_name):
 # In[3]:
 
 
-folder_name = "../data/"
+folder_name = "/.cached/data/"
 train_ID_name = folder_name + "ID_train"
 train_result_name = folder_name + "ISEAR_train"
 train_data = decode_file(train_ID_name, train_result_name)
 
 
 # In[4]:
+
 
 class MyVocab:
     def __init__(self):
@@ -75,7 +76,7 @@ def resize_sentence(data, normal_len):
     def pad(sentence, size):
         return sentence[:size] if len(sentence) > size else sentence+[0]*(size-len(sentence))
     return [[pad(sentence[0], normal_len), sentence[1]] for sentence in data]
-    
+
 
 train_vocab = build_vocab(train_data)
 
@@ -95,7 +96,7 @@ class TrainDataset(Dataset):
         self._data = []
         for sentence in data:
             self._data.append([[vocab.locate(x) for x in sentence[0]], sentence[1]])
-#        self._data = resize_sentence(self._data, normal_len)
+        self._data = resize_sentence(self._data, normal_len)
         self.set_attrs(batch_size=self._batch_size, total_len=self._total_len, shuffle=self._shuffle)
             
     def __getitem__(self, index):
@@ -103,7 +104,7 @@ class TrainDataset(Dataset):
         label = np.argmax(self._data[index][1])
         return feature, label
     
-trainDataset = TrainDataset(vocab = train_vocab, data = train_data, normal_len=180, batch_size=1, shuffle=True)
+trainDataset = TrainDataset(vocab = train_vocab, data = train_data, normal_len=180, batch_size = 13)
 
 
 # In[6]:
@@ -120,7 +121,7 @@ class TextRNN(jt.Module):
                                hidden_size=num_hiddens,
                                num_layers=num_layers,
                                bidirectional=False)
-        self._decoder = nn.Linear(num_hiddens * 2, num_emotion)
+        self._decoder = nn.Linear(num_hiddens * num_layers, num_emotion)
         
     def execute(self, inputs):
         '''
@@ -136,10 +137,10 @@ class TextRNN(jt.Module):
         embeddings = jt.reshape(embeddings, (batch_size, embeddings.shape[0]//batch_size, embeddings.shape[1]))
         embeddings = embeddings.permute(1, 0, 2)
         # embeddings -> (len_sentence, batch_size, embed_size)
-        hx = (jt.ones((self._num_layers, batch_size, self._num_hiddens)),
-              jt.ones((self._num_layers, batch_size, self._num_hiddens)))
-        hiddens, _ = self._encoder(embeddings, hx)
-        encoding = jt.concat([hiddens[0], hiddens[-1]], dim = -1)
+        hx = (jt.zeros((self._num_layers, batch_size, self._num_hiddens)),
+              jt.zeros((self._num_layers, batch_size, self._num_hiddens)))
+        outputs, hiddens = self._encoder(embeddings, hx)
+        encoding = hiddens[0].permute(1, 0, 2).reshape(batch_size, -1)
         outputs = self._decoder(encoding)
         return outputs
 
@@ -155,17 +156,17 @@ def train(model, train_loader, optimizer, init_lr, epoch, max_epoch, start_time)
     model.train()
     max_iter = len(train_loader)
     
-    sum_tot, sum_acc, loss_sum = 0, 0, 0
+    sum_tot, sum_acc, sum_loss = 0,0,0
     for index, (feature, label) in enumerate(train_loader):
         pred = model(feature)
         loss = nn.cross_entropy_loss(pred, label)
-        loss_sum += loss.data[0]
         optimizer.step(loss)
-        sum_acc += (jt.argmax(pred, dim=-1)[0] == label).float().sum()
-        sum_tot = sum_tot + label.shape[0]
-        if index % 200 == 199:
+        sum_acc += (jt.argmax(pred, dim = -1)[0] == label).float().sum()
+        sum_tot += label.shape[0]
+        sum_loss += loss.data[0]
+        if index % 500 == 0:
             print ('Training in epoch {} iteration {} acc = {} loss = {}, time = {}'
-                   .format(epoch, index, sum_acc/sum_tot, loss_sum/(index+1), time.time() - start_time))
+                   .format(epoch, index, sum_acc/sum_tot, sum_loss/(index+1), time.time() - start_time))
 
 def evaluate(model, test_loader, epoch):
     model.eval()
@@ -174,12 +175,13 @@ def evaluate(model, test_loader, epoch):
     sum_tot = 0
     for index, (feature, label) in enumerate(test_loader):
         pred = model(feature)
-        sum_acc += (jt.argmax(pred, dim=-1)[0] == label).float().sum()
-        sum_tot = sum_tot + label.shape[0]
+        if jt.argmax(pred, dim = -1)[0] == label[0]:
+            sum_acc = sum_acc + 1
+        sum_tot = sum_tot + 1
     print ("Testing in epoch {}, acc = {}".format(epoch, sum_acc / sum_tot))
 
 
-# In[ ]:
+# In[8]:
 
 
 test_ID_name = folder_name + "ID_test"
@@ -195,14 +197,6 @@ start_time = time.time()
 for epoch in range(max_epoch):
     train(net, trainDataset, optimizer, learning_rate, epoch, max_epoch, start_time)
     evaluate(net, testDataset, epoch)
-
-
-# In[ ]:
-
-
-pred = jt.array([[1],[2],[3],[4]])
-label = jt.array([[1],[2],[0],[1]])
-print(pred == label)
 
 
 # In[ ]:
